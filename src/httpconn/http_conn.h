@@ -56,7 +56,7 @@ public:
         NO_RESOURCE,
         FORBIDDEN_REQUEST,
         FILE_REQUEST,
-        ITERNAL_ERROR,
+        INTERNAL_ERROR,
         CLOSED_CONNECTION,
     };
 
@@ -72,7 +72,7 @@ public:
     ~http_conn(){}
 
 public:
-    void init(int sockfd, const sockaddr_in& addr);    // 初始化新接收的连接
+    void init(int sockfd, const sockaddr_in& addr);     // 初始化新接收的连接
     void close_conn(bool real_close = true);            // 关闭连接
     void process();                                     // 处理客户请求
     bool read();                                        // 非阻塞读操作
