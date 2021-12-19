@@ -10,6 +10,7 @@
 #include <cassert>
 #include <sys/epoll.h>
 
+#include "amyconfig.h"
 #include "threadpool.h"
 #include "http_conn.h"
 
@@ -39,72 +40,89 @@ void show_error( int connfd, const char* info )
     close( connfd );
 }
 
+#include <iostream>
 
 int main( int argc, char* argv[] )
 {
-    printf("start mylinuxserver...\n");
+    AMyConfig myConfig("./config/serverbase.ini");
+    std::string sIP = myConfig.getCfgValue("base","ip");
+    std::string sPort = myConfig.getCfgValue("base","port");
+    printf("Start mylinuxserver: IP:%s, Port:%s \n", sIP.c_str(), sPort.c_str());
 
-    if( argc <= 2 )
-    {
-        printf( "usage: %s ip_address port_number\n", basename( argv[0] ) );
-        return 1;
-    }
-    const char* ip = argv[1];
-    int port = atoi( argv[2] );
+    // if( argc <= 2 )
+    // {
+    //     printf( "usage: %s ip_address port_number\n", basename( argv[0] ) );
+    //     return 1;
+    // }
+    // const char* ip = argv[1];
+    // int port = atoi( argv[2] );
 
-    addsig( SIGPIPE, SIG_IGN );
+    const char* ip = sIP.c_str();
+    int nPort = atoi(sPort.c_str());
 
-    threadpool< http_conn >* pool = NULL;
+    // 忽略“Broken pipe向一个没有读端的管道写数据”信号
+    addsig(SIGPIPE, SIG_IGN);
+
+    // 创建线程池
+    threadpool<http_conn>* pThreadPool = nullptr;
     try
     {
-        pool = new threadpool< http_conn >;
+        pThreadPool = new threadpool<http_conn>;
     }
-    catch( ... )
+    catch(...)
     {
         return 1;
     }
 
-    http_conn* users = new http_conn[ MAX_FD ];
-    assert( users );
-    int user_count = 0;
+    // 创建连接用户数组，最大连接数 MAX_FD
+    http_conn* pUsers = new http_conn[MAX_FD];
+    assert(pUsers);
+    //int user_count = 0;
 
-    int listenfd = socket( PF_INET, SOCK_STREAM, 0 );
-    assert( listenfd >= 0 );
+    int listenfd = socket(PF_INET, SOCK_STREAM, 0);
+    assert(listenfd >= 0);
+
+    /*
+     * TCP提供了异常终止一个连接的方法，即给对方发送一个复位报文段。
+     * 一旦发送了复位报文段，发送端所有排队等待发送的数据都将被丢弃。
+     * 应用程序可以使用socket选项SO_LINGER来发送复位报文段，以异常终止一个连接。
+    */
     struct linger tmp = { 1, 0 };
-    setsockopt( listenfd, SOL_SOCKET, SO_LINGER, &tmp, sizeof( tmp ) );
+    setsockopt(listenfd, SOL_SOCKET, SO_LINGER, &tmp, sizeof( tmp ));
+
+    struct sockaddr_in address;
+    bzero(&address, sizeof(address));
+    address.sin_family = AF_INET;
+    inet_pton(AF_INET, ip, &address.sin_addr);
+    address.sin_port = htons(nPort);
 
     int ret = 0;
-    struct sockaddr_in address;
-    bzero( &address, sizeof( address ) );
-    address.sin_family = AF_INET;
-    inet_pton( AF_INET, ip, &address.sin_addr );
-    address.sin_port = htons( port );
-
-    ret = bind( listenfd, ( struct sockaddr* )&address, sizeof( address ) );
-    assert( ret >= 0 );
+    ret = bind(listenfd, (struct sockaddr*)&address, sizeof(address));
+    assert(ret >= 0);
 
     ret = listen( listenfd, 5 );
     assert( ret >= 0 );
 
-    epoll_event events[ MAX_EVENT_NUMBER ];
-    int epollfd = epoll_create( 5 );
-    assert( epollfd != -1 );
-    addfd( epollfd, listenfd, false );
+    epoll_event events[MAX_EVENT_NUMBER];   // 传出参数
+    int epollfd = epoll_create(5);
+    assert(epollfd != -1);
+    addfd(epollfd, listenfd, false);
     http_conn::m_epollfd = epollfd;
 
-    while( true )
+    while(true)
     {
+        // 第四个参数-1表示阻塞
         int number = epoll_wait( epollfd, events, MAX_EVENT_NUMBER, -1 );
-        if ( ( number < 0 ) && ( errno != EINTR ) )
+        if(number < 0 && errno != EINTR)  // 失败返回-1
         {
             printf( "epoll failure\n" );
             break;
         }
 
-        for ( int i = 0; i < number; i++ )
+        for( int i = 0; i < number; i++ )
         {
             int sockfd = events[i].data.fd;
-            if( sockfd == listenfd )
+            if( sockfd == listenfd )    // 有新客户接入
             {
                 struct sockaddr_in client_address;
                 socklen_t client_addrlength = sizeof( client_address );
@@ -120,38 +138,40 @@ int main( int argc, char* argv[] )
                     continue;
                 }
                 
-                users[connfd].init( connfd, client_address );
+                pUsers[connfd].init( connfd, client_address );
             }
-            else if( events[i].events & ( EPOLLRDHUP | EPOLLHUP | EPOLLERR ) )
+            else if( events[i].events & ( EPOLLRDHUP | EPOLLHUP | EPOLLERR ) )  // 有异常
             {
-                users[sockfd].close_conn();
+                pUsers[sockfd].close_conn();
             }
-            else if( events[i].events & EPOLLIN )
+            else if( events[i].events & EPOLLIN )   // 读事件
             {
-                if( users[sockfd].read() )
+                if(pUsers[sockfd].read())
                 {
-                    pool->append( users + sockfd );
+                    pThreadPool->append(pUsers + sockfd);   // 直接将pUsers+sockfd作为指针
                 }
                 else
                 {
-                    users[sockfd].close_conn();
+                    pUsers[sockfd].close_conn();    // 读失败，关闭连接
                 }
             }
-            else if( events[i].events & EPOLLOUT )
+            else if( events[i].events & EPOLLOUT )  // 写事件
             {
-                if( !users[sockfd].write() )
+                if(false == pUsers[sockfd].write())
                 {
-                    users[sockfd].close_conn();
+                    pUsers[sockfd].close_conn();    // 写失败，关闭连接
                 }
             }
             else
-            {}
+            {
+
+            }
         }
     }
 
-    close( epollfd );
-    close( listenfd );
-    delete [] users;
-    delete pool;
+    close(epollfd);
+    close(listenfd);
+    delete[] pUsers;
+    delete pThreadPool;
     return 0;
 }
